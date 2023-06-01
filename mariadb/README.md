@@ -1,13 +1,138 @@
 # MariaDB SP Explanation
 
+## Variable Lifecycle
+
+### Initialization settings
+
+```bash
+$ mysql -u root -P 3306 -p # Password 12345
+$ CREATE USER 'panhong'@'localhost' IDENTIFIED BY '12345';
+$ GRANT ALL PRIVILEGES ON *.* TO 'panhong'@'localhost' WITH GRANT OPTION;
+$ FLUSH PRIVILEGES;
+
+$ mysql -u panhong -h localhost -P 3306 -p # Password 12345
+$ CREATE DATABASE panhong;
+$ USE panhong;
+```
+
+### Check SP status
+
+```bash
+$ SHOW PROCEDURE STATUS WHERE Db = 'panhong' AND Name NOT LIKE 'mysql%';
+
+$ DROP PROCEDURE var_Lifecycle;
+
+$ CALL var_Lifecycle();
+```
+
+### Generate a test SP
+
+```sql
+-- Set the delimiter // 
+DELIMITER //
+
+-- Generate SP, named var_Lifecycle()
+CREATE PROCEDURE var_Lifecycle()
+-- SP starts
+BEGIN
+    -- Declaring variables of different types
+    DECLARE count INT DEFAULT 0;
+    SET count = 10;
+    SET @exist = 11;
+
+-- SP ends
+END//
+
+-- Restore delimiter ;
+DELIMITER ;
+```
+
+### Call the test SP
+
+```sql
+# >>>>> >>>>> >>>>> >>>>> >>>>> in MariaDB Section1
+
+$ mysql -u panhong -h localhost -P 3306 -p # Password 12345
+
+USE panhong;
+
+CALL var_Lifecycle();
+# Query OK, 0 rows affected (0.001 sec)
+
+SELECT @exist;
+#+--------+
+#| @exist |
+#+--------+
+#|     11 |
+#+--------+
+# 1 row in set (0.000 sec)
+
+SELECT count;
+# ERROR 1054 (42S22): Unknown column 'count' in 'field list'
+
+
+
+# >>>>> >>>>> >>>>> >>>>> >>>>> in MariaDB Section2
+
+$ mysql -u panhong -h localhost -P 3306 -p # Password 12345
+
+USE panhong;
+
+SELECT @exist;
+#+--------+
+#| @exist |
+#+--------+
+#| NULL   |
+#+--------+
+#1 row in set (0.000 sec)
+
+
+
+# >>>>> >>>>> >>>>> >>>>> >>>>> in MariaDB Section1
+exit
+
+mysql -u panhong -h localhost -P 3306 -p # Password 12345
+
+USE panhong
+
+SELECT @exist;
+#+--------+
+#| @exist |
+#+--------+
+#| NULL   |
+#+--------+
+#1 row in set (0.000 sec)
+```
+
+As can be seen from the above, the @exist variable `only exists in the MariaDB session that was logged in`.
+
+After logging out, the @exist variable will `be released`. 
+
+(只存在于登入的MariaDB 的 Session 里，登出后被适放)
+
 ## Generate an array using JSON
 
 ### Initialization settings
 
 ```bash
+$ mysql -u root -P 3306 -p # Password 12345
 $ CREATE USER 'panhong'@'localhost' IDENTIFIED BY '12345';
-$ CREATE DATABASES ORDERS;
-$ USE ORDERS;
+$ GRANT ALL PRIVILEGES ON *.* TO 'panhong'@'localhost' WITH GRANT OPTION;
+$ FLUSH PRIVILEGES;
+
+$ mysql -u panhong -h localhost -P 3306 -p # Password 12345
+$ CREATE DATABASE panhong;
+$ USE panhong;
+```
+
+### Check SP status
+
+```bash
+$ SHOW PROCEDURE STATUS WHERE Db = 'panhong' AND Name NOT LIKE 'mysql%';
+
+$ DROP PROCEDURE array_from_json;
+
+$ CALL array_from_json();
 ```
 
 ### Generate an array on SP
