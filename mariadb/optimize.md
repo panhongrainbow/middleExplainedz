@@ -263,7 +263,7 @@ select user_name,sex,age from test where user_name like 'test%' and sex =1 ORDER
 
 Total score: 73%.
 
-## transaction
+## Transaction
 
 ### ACID
 
@@ -274,9 +274,7 @@ Total score: 73%.
 | Durability  | Once committed, modifications made by a transaction are permanently stored in the database, even in the event of system failure. (要永久储存) |
 | Isolation   | Each transaction's execution remains unaffected by other concurrently executing transactions. Isolation prevents interference between operations and data used by different transactions. (复杂，再谈) |
 
-### Durability
-
-#### Question
+### Question of Isolation
 
 If isolation is not ensured, what problems can occur?
 
@@ -299,7 +297,7 @@ This is no Durability.
 
 The error is that both transactions read the initial value of B's account as 10,000.
 
-#### Problem
+### Problem of Isolation
 
 | **Type**              | **Description**                                              | **Illustration**                                             |
 | --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -307,25 +305,25 @@ The error is that both transactions read the initial value of B's account as 10,
 | **Unrepeatable Read** | Happens when the same record is retrieved twice within a transaction, and the results differ between the reads. (同一个事务的值每次都不同) | ![Unrepeatable Read](https://fynotefile.oss-cn-zhangjiakou.aliyuncs.com/fynote/fyfile/5983/1651212459071/3895ad68683747e88b114bba40f48ad9.png) |
 | **Phantom Read**      | Occurs when another transaction adds new records within the range being read by the ongoing transaction. (同一事务多出一些数据) | ![Phantom Read](https://fynotefile.oss-cn-zhangjiakou.aliyuncs.com/fynote/fyfile/5983/1651212459071/3a92feb9aa014a7eaaf784d1c7057822.png) |
 
-#### Durability in SQL Standards
+### Isolation in SQL Standards
 
-| **Severity (in descending order)** | **Isolation Level** | **Possible Issues**                         |
-| ---------------------------------- | ------------------- | ------------------------------------------- |
-| **1. Most Severe**                 | READ UNCOMMITTED    | Dirty Read, Unrepeatable Read, Phantom Read |
-| **2. Severe**                      | READ COMMITTED      | Unrepeatable Read, Phantom Read             |
-| **3. Moderate**                    | REPEATABLE READ     | Phantom Read                                |
-| **4. Least Severe**                | SERIALIZABLE        | None                                        |
+| **Isolation Level** | **Possible Issues**                         |
+| ------------------- | ------------------------------------------- |
+| READ UNCOMMITTED    | Dirty Read, Unrepeatable Read, Phantom Read |
+| READ COMMITTED      | Unrepeatable Read, Phantom Read             |
+| REPEATABLE READ     | Phantom Read                                |
+| SERIALIZABLE        | None                                        |
 
-#### Durability in Mysql
+### Isolation in Mysql
 
-| **Severity (in descending order)** | **Isolation Level** | **Possible Issues**                               |
-| ---------------------------------- | ------------------- | ------------------------------------------------- |
-| **1. Most Severe**                 | READ UNCOMMITTED    | Dirty Read, Unrepeatable Read, Phantom Read       |
-| **2. Severe**                      | READ COMMITTED      | Unrepeatable Read, Phantom Read                   |
-| **3. Moderate**                    | REPEATABLE READ     | **Phantom Read (Resolve a portion of the issue)** |
-| **4. Least Severe**                | SERIALIZABLE        | None                                              |
+| **Isolation Level** | **Possible Issues**                               |
+| ------------------- | ------------------------------------------------- |
+| READ UNCOMMITTED    | Dirty Read, Unrepeatable Read, Phantom Read       |
+| READ COMMITTED      | Unrepeatable Read, Phantom Read                   |
+| REPEATABLE READ     | **Phantom Read (Resolve a portion of the issue)** |
+| SERIALIZABLE        | None                                              |
 
-#### Set up statement
+### Set up statement
 
 We can modify the transaction isolation level using the following statement:
 
@@ -350,5 +348,219 @@ level: {
 | 5    | SESSION | - Execute: `SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE;` <br> - Effect: Affects all subsequent transactions within the current session. |
 | 6    | N/A     | - Execute: `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;` <br> - Effect: Only impacts the next transaction in the current session; subsequent transactions revert to the previous isolation level. |
 
+### Startup parameter
 
+To change the default transaction isolation level when starting the server, modify the "transaction-isolation" startup parameter. For instance, using "--transaction-isolation=SERIALIZABLE" will change it from "REPEATABLE READ" to "SERIALIZABLE."
+
+To check the current session's default isolation level, use the following command:
+
+```sql
+SHOW VARIABLES LIKE 'transaction_isolation'; (>  MySQL 5.7.20)
+SHOW VARIABLES LIKE 'tx_isolation'; (<=  MySQL 5.7.20)
+
++---------------+-----------------+
+| Variable_name | Value           |
++---------------+-----------------+
+| tx_isolation  | REPEATABLE-READ |
++---------------+-----------------+
+```
+
+Or use the shorter syntax:
+
+```sql
+SELECT @@transaction_isolation; (>  MySQL 5.7.20)
+SELECT @@tx_isolation; (<=  MySQL 5.7.20)
+
++-----------------+
+| @@tx_isolation  |
++-----------------+
+| REPEATABLE-READ |
++-----------------+
+```
+
+### Command
+
+| **Transaction Action**   | **SQL Statements**                             | **Result**                                         |
+| ------------------------ | ---------------------------------------------- | -------------------------------------------------- |
+| **Transaction Begin**    | `BEGIN`<br>`START TRANSACTION`<br>`BEGIN WORK` | -                                                  |
+| **Transaction Rollback** | `ROLLBACK`                                     | Data inserted during the transaction is discarded. |
+| **Transaction Commit**   | `COMMIT`                                       | Data inserted during the transaction is preserved. |
+
+### Save Point
+
+In MySQL, you can employ savepoints within your transaction to selectively rollback to a specific point in your sequence of statements, allowing you to retain changes made before that point. This provides more granular control over your transactions.
+
+```
+SAVEPOINT savepoint_name;
+```
+
+To roll back to a specific savepoint, you can use the following statement (the words "WORK" and "SAVEPOINT" are optional in the statement below):
+
+```
+ROLLBACK TO SAVEPOINT savepoint_name;
+```
+
+To remove a savepoint, you can use the following statement:
+
+```
+RELEASE SAVEPOINT savepoint_name;
+```
+
+However, if you don't specify a savepoint name after the ROLLBACK statement, it will directly roll back to the state before the transaction began. (ROLLBACK 回滚到事务前)
+
+### Implicit Commits
+
+When we initiate a transaction using the **START TRANSACTION or BEGIN** statement, or set the `autocommit` system variable to `OFF`, the transaction **won't automatically commit**.
+
+However, some statements quietly trigger a commit, as if you had used the COMMIT statement. This scenario, where transactions are implicitly committed due to certain special statements, is referred to as an **implicit commit**.
+
+
+
+Statements that can cause an implicit commit include:
+
+| **Type of Implicit Commit**                                  | **Description**                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **Executing DDL Statements**                                 | DDL (Data Definition Language) statements that define or modify database objects, such as **databases, tables, views, stored procedures, etc**.<br />Using **CREATE, ALTER, DROP**, or similar statements to modify these objects will implicitly commit preceding statements within the transaction. (DDL 操作) |
+| **Implicit Use or Modification of Tables in the MySQL Database** | Statements like **ALTER USER, CREATE USER, DROP USER, GRANT, RENAME USER, REVOKE, SET PASSWORD**, etc., also implicitly commit preceding statements within the transaction. (修改用户权限) |
+| **Transaction Control or Lock-Related Statements**           | Initiating another transaction with **START TRANSACTION or BEGIN** in a session while a previous transaction remains uncommitted or unrolled back will implicitly commit the previous transaction.<br />Additionally, changing the **autocommit system variable from OFF to ON** manually and using lock-related statements like **LOCK TABLES** and **UNLOCK TABLES** will have the same effect. |
+| **Data Loading Statements**                                  | Using the **LOAD DATA** statement to bulk import data into the database will implicitly commit the preceding transaction statements. |
+| **Statements Related to MySQL Replication**                  | Statements like **START SLAVE, STOP SLAVE, RESET SLAVE, CHANGE MASTER TO**, etc., will implicitly commit the preceding transaction statements. |
+| **Other Statements**                                         | Statements like **ANALYZE TABLE, CACHE INDEX, CHECK TABLE, FLUSH, LOAD INDEX INTO CACHE, OPTIMIZE TABLE, REPAIR TABLE, RESET**, and others also implicitly commit the preceding transaction statements. |
+
+DDL Example
+
+```sql
+CREATE TABLE Table1 (
+    id INT AUTO_INCREMENT PRIMARY KEY, 
+    name VARCHAR(255) 
+);
+
+SET AUTOCOMMIT=0;
+
+START TRANSACTION;
+
+INSERT INTO Table1 (name) VALUES ('John');
+
+CREATE TABLE Table2 (
+    id INT AUTO_INCREMENT PRIMARY KEY, 
+    name VARCHAR(255) 
+);
+
+ROLLBACK; 
+
+SELECT * FROM Table1; -- Cannot Rollback
++----+------+ 
+| id | name | 
++----+------+ 
+|  1 | John | 
++----+------+ 
+```
+
+LOAD DATA Example
+
+```sql
+LOAD DATA INFILE '/path/to/your/data.csv'
+INTO TABLE ImportTable
+FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n';
+```
+
+## MVCC
+
+### Hidden Column
+
+We know that, for tables using the InnoDB storage engine, their clustered index records always include two essential hidden columns:
+
+Here's the content organized into a table:
+
+| **Hidden Column** | **Description**                                              |
+| ----------------- | ------------------------------------------------------------ |
+| trx_id            | When a transaction modifies a clustered index record, it assigns the transaction's ID to the trx_id hidden column. |
+| roll_pointer      | Each time changes are made to a clustered index record, the previous version is written to the undo log. This hidden column effectively serves as a pointer, enabling you to access the record's information before the modification. |
+
+<img src="../assets/image-20231016144217472.png" alt="image-20231016144217472" style="zoom:80%;" />
+
+<img src="../assets/image-20231016144611311.png" alt="image-20231016144611311" style="zoom:80%;" /> 
+
+<img src="../assets/image-20231016144902923.png" alt="image-20231016144902923" style="zoom:80%;" />
+
+### Undo
+
+(Additional point: Undo log: To achieve transaction atomicity, the InnoDB storage engine, in actuality, keeps a record of corresponding undo logs for **insert, delete, or update operations**. Typically, each change to a record corresponds to a single undo log. (一条修改对一个 undo)
+
+Certain update operations can generate two undo logs. A transaction may include **creating, deleting, or updating multiple records**, leading to the creation of multiple corresponding undo logs. These undo logs are sequentially numbered, referred to as the 0th, 1st, and so forth, and collectively known as undo numbers. (多笔 undo 日志编号)
+
+<img src="../assets/image-20231016154140802.png" alt="image-20231016154140802" style="zoom:80%;" />
+
+### Fix Problem
+
+To solve all the issues, the use of a Read View is necessary.
+
+| **Isolation Level** | **Possible Issues**                         | **Scenario**                                                 |
+| ------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| READ UNCOMMITTED    | Dirty Read, Unrepeatable Read, Phantom Read | Doesn't care about anything, so all problems, including Dirty Read, Unrepeatable Read, and Phantom Read, may occur. (都是问题) |
+| READ COMMITTED      | Unrepeatable Read, Phantom Read             | Requires the use of **Read View** to resolve issues.         |
+| REPEATABLE READ     | Phantom Read                                | Requires the use of **Read View** to resolve issues.         |
+| SERIALIZABLE        | None                                        | Executes transactions in a fully serial manner, effectively resolving all problems. (没有问题) |
+
+In MySQL, a significant difference between the READ COMMITTED and REPEATABLE READ isolation levels is the timing of when they generate the Read View. (差在时机不同)
+
+- READ COMMITTED -> The Read View is created for individual transactions as soon as they perform a Select operation, resulting in many Read Views.
+- REPEATABLE READ -> After a Select operation, it checks if the Read View already exists. If not, a new Read View is created.
+
+| **Type**              | **Description**                                              | **How MVCC deal with ?**                                     |
+| --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **Dirty Read**        | Occurs when a transaction reads data modified but not yet committed by another transaction. (读到其他事务未提交之值) | Because it will check the active version, it must not be in the active version to be usable, and it is not possible to read records that have not been committed. (永远读最新 commit 的数据, **Example 1** and **Example 2**) |
+| **Unrepeatable Read** | Happens when the same record is retrieved twice within a transaction, and the results differ between the reads. (同一个事务的值每次都不同) | (1) If the trx_id attribute value of the accessed version is the same as the creator_trx_id value in the ReadView, it indicates that **the current transaction is accessing records it has modified itself**, allowing the current transaction to access this version. (表示当前事务正在访问其自身修改过的记录)<br />(2) If the trx_id attribute value of the accessed version is less than the min_trx_id value in the ReadView, it signifies that the transaction that generated this version was committed before the current transaction created the ReadView. Hence, the current transaction can access this version without reading the content of a ROLLBACK. (不会读取到ROLLBACK的内容)<br />(3) If a transaction's trx_id falls between min_trx_id and max_trx_id, it implies that the version was created after min_trx_id but before max_trx_id. This typically indicates that the version was created by an uncommitted transaction. In this case, caution is needed to ensure that potentially rolled back changes are not read. (需要小心处理以确保不会读取到可能被回滚的更改)<br />(4) Generally, if a transaction's trx_id is greater than max_trx_id, it means the version was created by an uncommitted transaction and after the creation of the ReadView. In this scenario, this version is not visible to the current transaction to ensure transaction consistency and isolation. (该版本对当前事务不可见，以保证事务的一致性和隔离性)<br /><br />In Example 3 |
+| **Phantom Read**      | Occurs when another transaction adds new records within the range being read by the ongoing transaction. (同一事务多出一些数据) |                                                              |
+
+#### Example 1:
+
+**READ COMMITTED Level** fixes **Dirty Read**
+(Always read the latest committed data.)
+
+| Time |                       tx_id = 80                       |                      tx_id = 120                       |
+| ---- | :----------------------------------------------------: | :----------------------------------------------------: |
+| T1   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T2   |                   ReadView [80;120]                    |                   ReadView [80;120]                    |
+| T3   |      UPDATE teacher  SET name = 'A' WHERE n = 1;       |      UPDATE teacher  SET name = 'B' WHERE n = 1;       |
+| T4   |   ReadView [80;120]<br />(80, 120 are not committed)   |   ReadView [80;120]<br />(80, 120 are not committed)   |
+| T5   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+
+**Each transaction** will generate a new Read View, and it just happens that they are all ReadView [80;120].
+
+#### Example 2:
+
+**READ COMMITTED Level** fixes **Dirty Read**
+(Always read the latest committed data.)
+
+| Time |                       tx_id = 80                       |                      tx_id = 120                       |
+| ---- | :----------------------------------------------------: | :----------------------------------------------------: |
+| T1   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T2   |                   ReadView [80,120]                    |                   ReadView [80,120]                    |
+| T3   |      UPDATE teacher  SET name = 'A' WHERE n = 1;       |      UPDATE teacher  SET name = 'B' WHERE n = 1;       |
+| T4   |                        COMMIT;                         |                                                        |
+| T5   |       ReadView [120]<br />(120 is not committed)       |   ReadView [80,120]<br />(80,120 are not committed)    |
+| T6   | SELECT * FROM teacher WHERE n = 1; <br />(Result is A) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+
+**Each transaction** will generate a new Read View, and it just happens that they are all ReadView [120].
+
+#### Example 3;
+
+**Read View** is [10, 20, 30, 40, 50] (就 Read View)
+
+**creator_trx_id** is 0 (资料建立者的 trx_id)
+
+**the latest committed data** is 5 (最新 Commit 资料)
+
+**min_trx_id** is 10 (最小未活跃的 trx_id)
+
+**max_trx_id** is 50+1 (最大未活跃的 trx_id)
+
+|  trx_id   | Situation                        | Result                                                       |
+| :-------: | -------------------------------- | ------------------------------------------------------------ |
+|     0     | trx_id == trx_id                 | Data creator modifying this data<br />(由数据创建者修改此数据) |
+|     9     | trx_id < min_trx_id              | Read this Read View with confidence, won't read rolled-back data<br />(放心读取这个 Read View，不会读到回滚的数据) |
+| 11 ... 49 | min_trx_id < trx_id < max_trx_id | Might read rolled-back data, so handle with caution, read the latest committed data<br />(可能会读到回滚的数据，因此需要小心处理，读到最新 Commit 的数据) |
+|    52     | trx_id > max_trx_id              | Not visible in this Read View (在这个 Read View 中不可见)    |
 
