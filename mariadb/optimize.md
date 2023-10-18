@@ -505,14 +505,14 @@ To solve all the issues, the use of a Read View is necessary.
 
 In MySQL, a significant difference between the READ COMMITTED and REPEATABLE READ isolation levels is the timing of when they generate the Read View. (差在时机不同)
 
-- READ COMMITTED -> The Read View is created for individual transactions as soon as they perform a Select operation, resulting in many Read Views.
-- REPEATABLE READ -> After a Select operation, it checks if the Read View already exists. If not, a new Read View is created.
+- READ COMMITTED -> The Read View is created for individual transactions as soon as they perform a Select operation, resulting in many Read Views. (多 Read View)
+- REPEATABLE READ -> After a Select operation, it checks if the Read View already exists. If not, a new Read View is created. (单一 Read View)
 
 | **Type**              | **Description**                                              | **How MVCC deal with ?**                                     |
 | --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | **Dirty Read**        | Occurs when a transaction reads data modified but not yet committed by another transaction. (读到其他事务未提交之值) | Because it will check the active version, it must not be in the active version to be usable, and it is not possible to read records that have not been committed. (永远读最新 commit 的数据, **Example 1** and **Example 2**) |
 | **Unrepeatable Read** | Happens when the same record is retrieved twice within a transaction, and the results differ between the reads. (同一个事务的值每次都不同) | (1) If the trx_id attribute value of the accessed version is the same as the creator_trx_id value in the ReadView, it indicates that **the current transaction is accessing records it has modified itself**, allowing the current transaction to access this version. (表示当前事务正在访问其自身修改过的记录)<br />(2) If the trx_id attribute value of the accessed version is less than the min_trx_id value in the ReadView, it signifies that the transaction that generated this version was committed before the current transaction created the ReadView. Hence, the current transaction can access this version without reading the content of a ROLLBACK. (不会读取到ROLLBACK的内容)<br />(3) If a transaction's trx_id falls between min_trx_id and max_trx_id, it implies that the version was created after min_trx_id but before max_trx_id. This typically indicates that the version was created by an uncommitted transaction. In this case, caution is needed to ensure that potentially rolled back changes are not read. (需要小心处理以确保不会读取到可能被回滚的更改)<br />(4) Generally, if a transaction's trx_id is greater than max_trx_id, it means the version was created by an uncommitted transaction and after the creation of the ReadView. In this scenario, this version is not visible to the current transaction to ensure transaction consistency and isolation. (该版本对当前事务不可见，以保证事务的一致性和隔离性)<br /><br />In Example 3 |
-| **Phantom Read**      | Occurs when another transaction adds new records within the range being read by the ongoing transaction. (同一事务多出一些数据) |                                                              |
+| **Phantom Read**      | Occurs when another transaction adds new records within the range being read by the ongoing transaction. (同一事务搜寻多出一些数据) | In the first Select, if the Read View is not found and another transaction inserts data and commits before the second Select, the Read View is created after the second Select, and the additional data will be retrieved.<br />(第一次 SELECT 没有产生 Read View，第二次 SELECT 就产生) |
 
 #### Example 1:
 
@@ -521,11 +521,13 @@ In MySQL, a significant difference between the READ COMMITTED and REPEATABLE REA
 
 | Time |                       tx_id = 80                       |                      tx_id = 120                       |
 | ---- | :----------------------------------------------------: | :----------------------------------------------------: |
-| T1   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
-| T2   |                   ReadView [80;120]                    |                   ReadView [80;120]                    |
-| T3   |      UPDATE teacher  SET name = 'A' WHERE n = 1;       |      UPDATE teacher  SET name = 'B' WHERE n = 1;       |
-| T4   |   ReadView [80;120]<br />(80, 120 are not committed)   |   ReadView [80;120]<br />(80, 120 are not committed)   |
-| T5   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T1   |                         BEGIN;                         |                         BEGIN;                         |
+| T2   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T3   |                   ReadView [80;120]                    |                   ReadView [80;120]                    |
+| T4   |      UPDATE teacher  SET name = 'A' WHERE n = 1;       |      UPDATE teacher  SET name = 'B' WHERE n = 1;       |
+| T5   |   ReadView [80;120]<br />(80, 120 are not committed)   |   ReadView [80;120]<br />(80, 120 are not committed)   |
+| T6   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T7   |                        COMMIT;                         |                        COMMIT;                         |
 
 **Each transaction** will generate a new Read View, and it just happens that they are all ReadView [80;120].
 
@@ -536,12 +538,14 @@ In MySQL, a significant difference between the READ COMMITTED and REPEATABLE REA
 
 | Time |                       tx_id = 80                       |                      tx_id = 120                       |
 | ---- | :----------------------------------------------------: | :----------------------------------------------------: |
-| T1   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
-| T2   |                   ReadView [80,120]                    |                   ReadView [80,120]                    |
-| T3   |      UPDATE teacher  SET name = 'A' WHERE n = 1;       |      UPDATE teacher  SET name = 'B' WHERE n = 1;       |
-| T4   |                        COMMIT;                         |                                                        |
-| T5   |       ReadView [120]<br />(120 is not committed)       |   ReadView [80,120]<br />(80,120 are not committed)    |
-| T6   | SELECT * FROM teacher WHERE n = 1; <br />(Result is A) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T1   |                         BEGIN                          |                         BEGIN                          |
+| T2   | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T3   |                   ReadView [80,120]                    |                   ReadView [80,120]                    |
+| T4   |      UPDATE teacher  SET name = 'A' WHERE n = 1;       |      UPDATE teacher  SET name = 'B' WHERE n = 1;       |
+| T5   |                        COMMIT;                         |                                                        |
+| T6   |       ReadView [120]<br />(120 is not committed)       |   ReadView [80,120]<br />(80,120 are not committed)    |
+| T7   | SELECT * FROM teacher WHERE n = 1; <br />(Result is A) | SELECT * FROM teacher WHERE n = 1; <br />(Result is C) |
+| T8   |                                                        |                         COMMIT                         |
 
 **Each transaction** will generate a new Read View, and it just happens that they are all ReadView [120].
 
@@ -563,4 +567,19 @@ In MySQL, a significant difference between the READ COMMITTED and REPEATABLE REA
 |     9     | trx_id < min_trx_id              | Read this Read View with confidence, won't read rolled-back data<br />(放心读取这个 Read View，不会读到回滚的数据) |
 | 11 ... 49 | min_trx_id < trx_id < max_trx_id | Might read rolled-back data, so handle with caution, read the latest committed data<br />(可能会读到回滚的数据，因此需要小心处理，读到最新 Commit 的数据) |
 |    52     | trx_id > max_trx_id              | Not visible in this Read View (在这个 Read View 中不可见)    |
+
+#### Example 4:
+
+At first, there is only a unique Read View, and the value of the Read View will change with the transactions' operations.
+
+| Time |                          tx_id = 80                          |                         tx_id = 120                          |
+| ---- | :----------------------------------------------------------: | :----------------------------------------------------------: |
+| T1   |                            BEGIN;                            |                                                              |
+| T2   |  SELECT * FROM teacher WHERE n = 1; <br />(Result is empty)  |                                                              |
+| T3   |                      ReadView = []int{}                      |                                                              |
+| T4   |                                                              | BEGIN<br />INSERT INTO teacher (name) VALUES ('B');<br />COMMIT; |
+| T5   | UPDATE teacher  SET name = 'A' WHERE n = 1;<br />(Result is OK ! Suddenly, additional data appears !) |                                                              |
+| T6   |           ReadView [80]<br />(80 is not committed)           |                                                              |
+| T7   |    SELECT * FROM teacher WHERE n = 1; <br />(Result is A)    |                                                              |
+| T7   |                           COMMIT;                            |                                                              |
 
