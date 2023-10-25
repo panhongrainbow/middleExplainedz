@@ -316,5 +316,3 @@ END AS MonthArray FROM (
 
 
 
-
-

@@ -454,6 +454,10 @@ SELECT * FROM Table1; -- Cannot Rollback
 +----+------+ 
 |  1 | John | 
 +----+------+ 
+
+DROP TABLE Table1;
+
+DROP TABLE Table2;
 ```
 
 LOAD DATA Example
@@ -582,4 +586,389 @@ At first, there is only a unique Read View, and the value of the Read View will 
 | T6   |           ReadView [80]<br />(80 is not committed)           |                                                              |
 | T7   |    SELECT * FROM teacher WHERE n = 1; <br />(Result is A)    |                                                              |
 | T7   |                           COMMIT;                            |                                                              |
+
+## LOCK
+
+### MVCC and LOCK
+
+How to deal with dirty reads, non-repeatable reads, and phantom reads?
+There are two solutions to choose from:
+(读要考虑是否用 MVCC 或者是 LOCK)
+
+| Solution | Description                                                  |
+| -------- | ------------------------------------------------------------ |
+| One:     | Use MVCC for reads and locks for writes<br/>Unable to address phantom reads unless using the Serial Level. |
+| Two:     | Use locks for both reads and writes<br/>**Dirty reads**: The transaction locks the data before writing, preventing dirty reads.<br>**Non-repeatable reads**: The transaction locks the data before writing, preventing differences in values between reads.<br>**Phantom reads**: During phantom reads, transactions lock the data before reading to avoid inconsistencies caused by concurrent write transactions. (如何处理幻读，再说) |
+
+### Current and Snapshot Read
+
+| Feature        | Current Read                                                 | Snapshot Read                                                |
+| -------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Read Pattern   | Current version of data                                      | Historical snapshot data                                     |
+| SQL Examples   | select lock in share mode (shared lock)<br />select for update (exclusive lock)<br />update (exclusive lock)<br />insert (exclusive lock)<br />delete (exclusive lock)<br />serializable transaction isolation level | Simple select queries,<br />excluding "...for update" or "...lock in share mode" |
+| Purpose        | Locking records being read, blocking other transactions from making concurrent changes to the same records, preventing safety issues | Used for queries that do not involve data updates; typically used to access **historical snapshots** of data for reporting, enhancing concurrency |
+| Use Cases      | Required for real-time, up-to-date data applications like financial transactions and order processing | Used for viewing specific historical data or generating reports |
+| Concurrency    | May encounter concurrency issues as multiple users or processes can access and update data simultaneously | Typically does not encounter concurrency issues because it deals with static snapshots unaffected by concurrent updates |
+| Implementation | Utilizes next-key locks, combining record locks and gap locks | Relies on undolog and MVCC mechanisms                        |
+
+### X S Lock For Select
+
+| Type           | Name            | Abbreviation | Description                                                  |
+| -------------- | --------------- | ------------ | ------------------------------------------------------------ |
+| Shared Lock    | Shared Locks    | S Lock       | If a transaction holds an S Lock, other transactions can simultaneously acquire S Lock.<br />(In Example 5)<br />(没有用共享锁的 Session 要等待共享锁内的工作完成) |
+| Exclusive Lock | Exclusive Locks | X Lock       | If a transaction holds an X Lock, other transactions cannot simultaneously acquire an X Lock or S Lock.<br />(In Example 6) |
+|                |                 | Conclusion   | X -> Incompatible with X, Incompatible with S <br/> S -> Incompatible with X, Compatible with S |
+
+Example 5
+
+```bash
+$ mysql -u root -p # Session 1
+```
+
+```sql
+CREATE TABLE Table1 (
+    id INT AUTO_INCREMENT PRIMARY KEY, 
+    name VARCHAR(255) 
+);
+
+SET AUTOCOMMIT=1;
+
+-- Start Transaction
+BEGIN;
+
+INSERT INTO Table1 (name) VALUES ('John');
+
+SELECT * FROM Table1 WHERE name = 'John' LOCK in SHARE MODE; -- Share Lock
+
+COMMI; -- Or use ROLLBACK to end the transaction and then release the share lock.
+-- (这时才把锁释放)
+```
+
+```bash
+$ mysql -u root -p # Session 2
+```
+
+```sql
+SELECT * FROM Table1 WHERE name = 'John' LOCK in SHARE MODE; -- Share Lock
+-- Execution can proceed even if a collision occurs.
+-- OK !
+```
+
+```bash
+$ mysql -u root -p # Session 3
+```
+
+```sql
+-- If other transactions want to acquire X locks, they will be blocked until the current transaction releases the S lock.
+
+SELECT * from Table1 WHERE name = 'John' FOR UPDATE; -- Exclusive Lock
+-- Execution cannot proceed even if a collision occurs.
+-- WAS BLOCKED !
+```
+
+```sql
+DROP TABLE Table1;
+```
+
+Example 6
+
+```bash
+$ mysql -u root -p # Session 1
+```
+
+```sql
+CREATE TABLE Table1 (
+    id INT AUTO_INCREMENT PRIMARY KEY, 
+    name VARCHAR(255) 
+);
+
+SET AUTOCOMMIT=1;
+
+-- Start Transaction
+BEGIN;
+
+INSERT INTO Table1 (name) VALUES ('John');
+
+SELECT * from Table1 WHERE name = 'John' FOR UPDATE; -- Exclusive Lock
+
+COMMI; -- Or use ROLLBACK to end the transaction and then release the share lock.
+-- (这时才把锁释放)
+```
+
+```bash
+$ mysql -u root -p # Session 2
+```
+
+```sql
+-- If other transactions want to acquire S locks, they will be blocked until the transaction 1 releases the X lock.
+
+SELECT * FROM Table1 WHERE name = 'John' LOCK in SHARE MODE; -- Execution can proceed even -- Execution cannot proceed even if a collision occurs.
+-- WAS BLOCKED !
+```
+
+```bash
+$ mysql -u root -p # Session 3
+```
+
+```sql
+-- If other transactions want to acquire X locks, they will be blocked until the transaction 1 releases the X lock.
+
+SELECT * from Table1 WHERE name = 'John' FOR UPDATE; -- Exclusive Lock
+-- Execution cannot proceed even if a collision occurs.
+-- WAS BLOCKED !
+```
+
+X S Lock For RUD
+
+| Operation Type | Operation Description                                        | Locking Mechanism                                            |
+| -------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| DELETE         | When performing a DELETE operation on a record, it first locates the record's position in the B Plus tree, acquires an X-lock on the record, and then performs a delete mark operation.<br />This can be seen as obtaining an X-lock for a locking read. | **Locking read (X-lock)**                                    |
+| INSERT         | Typically, when inserting a new record, the operation is not locked, but an implicit lock is used to ensure that it is not accessed by other transactions until it is committed. Sometimes locks may also be acquired, depending on specific circumstances. | **Implicit lock (隐式索)**                                   |
+| UPDATE         | When updating a record, there are three scenarios:<br>1. If the key value is unchanged, and **the storage space remains the same**, it acquires an X-lock and makes modifications.<br />This is considered as obtaining an X-lock for a locking read.<br>(不是修改主键，B加未分割，X锁)<br />2. If the key value is unchanged but the storage space changes, it acquires an X-lock, deletes the record, and inserts a new one. This involves locking read (X-lock) and implicit locks.<br>(不是修改主键，但B加分割，X锁和隐式索)<br />3. If the key value is modified, it is equivalent to a DELETE and INSERT operation, and locks should be applied according to DELETE and INSERT rules.<br />(聚簇索引和所有的二级索引都要改，复杂) | Locking read (X-lock) and implicit locks, depending on the condition. |
+
+### X S Lock For Table
+
+| After the operation                 | Need an S-lock on the table | Need an S-lock on some records in the table | Need an X-lock on the table | Need an X-lock on some records in the table |
+| ----------------------------------- | --------------------------- | ------------------------------------------- | --------------------------- | ------------------------------------------- |
+| After adding an S-lock to the table | Allowed                     | Allowed                                     | Not allowed                 | Not allowed                                 |
+| After adding an X-lock to the table | Not allowed                 | Not allowed                                 | Not allowed                 | Not allowed                                 |
+
+### Intention Lock
+
+IS and IX locks are table-level locks, introduced solely to quickly determine if records in the table are locked when acquiring table-level S and X locks later on, in order to avoid having to check for locked records by traversing the table. (意向锁只有表锁)
+
+| Combinations | X    | IX   | S    | IS   |
+| ------------ | ---- | ---- | ---- | ---- |
+| Table Lock   | Yes  | Yes  | Yes  | Yes  |
+| Row Lock     | Yes  |      | Yes  |      |
+
+The compatibility principles of Intention Locks are as follows:
+1. Intention Locks are mutually compatible (Blue line).
+2. Shared Indexes are mutually compatible (Green line).
+
+| Compatibility | X            | IX           | S            | IS           |
+| ------------- | ------------ | ------------ | ------------ | ------------ |
+| X             | Incompatible | Incompatible | Incompatible | Incompatible |
+| IX            | Incompatible |              | Incompatible |              |
+| S             | Incompatible | Incompatible |              |              |
+| IS            | Incompatible |              |              |              |
+
+<img src="../assets/image-20231023160638826.png" alt="image-20231023160638826" style="zoom:80%;" />
+
+InnoDB supports table locks, row locks, and transactions, and MyISAM offers Concurrent Inserts to speed up the writing process.
+
+| Storage Engine | Supported Lock Types               | Transaction Support | Lock Granularity             | Best Use Cases                                               |
+| -------------- | ---------------------------------- | ------------------- | ---------------------------- | ------------------------------------------------------------ |
+| InnoDB         | Table-level Locks, Row-level Locks | Supported           | Table-level and Fine-grained | High concurrency, scenarios that require fine-grained concurrent control |
+| MyISAM         | Table-level Locks                  | Not Supported       | Coarse                       | Read-only, mostly read operations, single-user scenarios     |
+| MEMORY         | Table-level Locks                  | Not Supported       | Coarse                       | Read-only, mostly read operations, single-user scenarios     |
+| MERGE          | Table-level Locks                  | Not Supported       | Coarse                       | Read-only, mostly read operations, single-user scenarios     |
+
+## Table-Level Locks in InnoDB
+
+### Introduction
+
+When executing SELECT, INSERT, DELETE, or UPDATE statements on InnoDB tables, table-level S-locks or X-locks are not added. InnoDB strives to use row-level locks.
+(innodb 使用行锁优先)
+
+When performing DDL statements such as ALTER TABLE or DROP TABLE, it can block other transactions' SELECT, INSERT, DELETE, or UPDATE statements. This is achieved through metadata locks (MDL) and the use of table-level S-locks and X-locks provided by InnoDB is uncommon.
+(**元数据 Metadata Lock**，去 Lock DDL)
+
+The metadata lock places intention locks, shared locks, and exclusive locks on metadata (such as tables, indexes, columns, etc.), ensuring that conflicts are avoided during concurrent access to database objects while maintaining data consistency and integrity.
+(很多类型的索做在 **元数据 Metadata Lock**)
+
+It is possible to manually acquire table-level S-locks or X-locks, but it is not recommended as it can reduce concurrency.
+Usage:
+
+- `LOCK TABLES t READ`: Adds a table-level S-lock.
+- `LOCK TABLES t WRITE`: Adds a table-level X-lock.
+
+(不要手动使用 innodb 表锁)
+
+### Categories
+
+| Category                           | Description                                                  |
+| ---------------------------------- | ------------------------------------------------------------ |
+| Table-Level IS and IX Intent Locks | - Before adding an S-lock to records in InnoDB tables, an IS intent lock needs to be acquired. Before adding an X-lock to records in the table, an IX intent lock needs to be acquired.<br />(innodb 会优先使用行锁)<br /><br />- IS and IX locks are used to determine whether the table contains locked records, avoiding the need to traverse and inspect the table manually. They cannot be added manually and are automatically managed by InnoDB.<br />(避免遍历上锁记录，系统自控) |
+| Table-Level AUTO-INC Lock          | Used for generating incremental values for columns with the AUTO_INCREMENT attribute. |
+|                                    | Two methods:<br />1. Using AUTO-INC locks, assigns an incremental value to the AUTO_INCREMENT column for each inserted record, which can block other transactions' INSERT statements.<br />2. Using lightweight locks, releases the lock immediately after generating the AUTO_INCREMENT column's value, improving insertion performance.<br />(2方式，写完放锁，取量放轻量锁) |
+|                                    | Control method:<br />- The `innodb_autoinc_lock_mode` system variable:<br />0 (using AUTO-INC locks), 1 (using lightweight locks), 2 (mixed usage).<br /><br />- When `innodb_autoinc_lock_mode` is set to 2, it may lead to overlapping values generated by different transactions, which is not suitable for master-slave replication scenarios.<br />(master 和 slave )<br />- The default value in MySQL 5.7.X is 1.<br />(混合在主从不可用) |
+
+## Row-Level Locks in InnoDB
+
+### Introduction
+
+- **Row-level locks**, also known as **record locks**, lock the index entries for records. (又叫记录锁)
+- InnoDB uses row-level locks only when retrieving data through index conditions; otherwise, it uses table locks. (有 B 加树才能执行行锁)
+- Whether it's a **primary key index, a unique index, or a regular index**, InnoDB employs row-level locks. (这些使用行锁)
+- The usage of index fields in the conditions for data retrieval is determined by the MySQL query execution plan. (以执行计算为准)
+- When retrieving data with range conditions, InnoDB locks the index entries of records that meet the criteria. (查询范围，会用行锁鎖範圍)
+
+### Categories
+
+| Lock        | Content                                                      |
+| ----------- | ------------------------------------------------------------ |
+| Record Lock | - Row locks are divided into S-locks and X-locks.<br>- After a transaction acquires an S-type record lock, other transactions can acquire the same S-type record lock for the same record, but they cannot acquire an X-type record lock.<br/>- After a transaction acquires an X-type record lock, other transactions cannot acquire either an S-type or X-type record lock.<br />(就是有X和S锁的特性) |
+| Gap Locks   | InnoDB provides Gap Locks to address the issue of **phantom reads**.<br>- Gap Locks actually lock the gaps between indexes rather than the indexes themselves.<br>- are used to prevent the insertion of new records into the gaps in the index to maintain consistency.<br>- It allows transactions to insert new records before and after the locked gap, but not within the locked gap.<br />(解决幻读，不对资料上锁，而对间隙上锁) |
+
+## Dead Lock
+
+### Concept
+
+Deadlock refers to a situation in which two or more processes, during their execution, become blocked due to either competing for resources or needing to communicate with each other. Without external intervention, they cannot make progress, and the system is said to be in a deadlock state.
+
+For example:
+
+A and B both go to a spa for a foot massage and want to receive a head massage at the same time. **Masseur 13 is skilled in foot massage, while masseur 14 specializes in head massage**.
+In this scenario, A quickly claims masseur 14, and B claims masseur 13.
+Both of them want to have both a foot massage and a head massage simultaneously, and neither is willing to yield.
+In this way, **A wants 14 and B wants 13**, resulting in a deadlock situation where both A and B cannot proceed with their desired massages simultaneously.
+
+(双方都要 13 14 ，一个在等 13，另一个在等 14)
+
+### Example
+
+```bash
+$ mysql -u root -p # Session 1
+```
+
+```sql
+CREATE TABLE Table1 (
+    id INT AUTO_INCREMENT PRIMARY KEY, 
+    name VARCHAR(255) 
+);
+
+SET AUTOCOMMIT=1;
+
+INSERT INTO Table1 (name) VALUES ('John');
+INSERT INTO Table1 (name) VALUES ('Tom');
+
+-- Start Transaction
+BEGIN;
+
+SELECT * FROM Table1 WHERE name = 'John' FOR UPDATE; -- Exclusive Lock
+```
+
+```bash
+$ mysql -u root -p # Session 2
+```
+
+```sql
+-- Start Transaction
+BEGIN;
+
+SELECT * FROM Table1 WHERE name = 'Tom' FOR UPDATE; -- Exclusive Lock
+-- When searching with WHERE conditions that do not use primary keys, table locks are employed, and this can lead to blocking.
+-- So, it is not possible to detect a deadlock.
+-- (都用表锁了，测不到死锁)
+```
+
+Afterward, both session 1 and session 2 executed a commit and prepared for retesting. (都 commit 重测)
+
+```bash
+$ mysql -u root -p # Session 1
+```
+
+```sql
+-- Start Transaction
+BEGIN;
+
+SELECT * FROM Table1 WHERE id = 1 FOR UPDATE; -- Exclusive Lock
+```
+
+```bash
+$ mysql -u root -p # Session 2
+```
+
+```sql
+-- Start Transaction
+BEGIN;
+
+SELECT * FROM Table1 WHERE id = 2 FOR UPDATE; -- Exclusive Lock
+```
+
+```bash
+# Switdh to Session 1
+```
+
+```sql
+SELECT * FROM Table1 WHERE id = 2 FOR UPDATE; -- Exclusive Lock
+-- Blocked due to the row lock not being released.
+```
+
+```bash
+$ mysql -u root -p # Session 2
+```
+
+```sql
+-- Start Transaction
+BEGIN;
+
+SELECT * FROM Table1 WHERE id = 1 FOR UPDATE; -- Exclusive Lock
+-- Dead Lock happens
+-- ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction
+```
+
+You can use SQL to query for deadlock details.
+
+```sql
+show engine  innodb status\G
+
+-- ------------------------
+-- LATEST DETECTED DEADLOCK
+-- ------------------------
+-- 2023-10-26 02:47:48 0x7f9690525640
+-- *** (1) TRANSACTION:
+-- TRANSACTION 3435, ACTIVE 67 sec starting index read
+-- mysql tables in use 1, locked 1
+-- LOCK WAIT 3 lock struct(s), heap size 1128, 2 row lock(s)
+-- MySQL thread id 32, OS thread handle 140284643444288, query id 106 localhost root Statistics
+-- SELECT * FROM Table1 WHERE id = 2 FOR UPDATE
+```
+
+Modify system variables to query for details.
+
+```sql
+show variables like 'innodb_status_output_locks';
+-- +----------------------------+-------+
+-- | Variable_name              | Value |
+-- +----------------------------+-------+
+-- | innodb_status_output_locks | OFF   |
+-- +----------------------------+-------+
+-- 1 row in set (0.002 sec)
+
+set global innodb_status_output_locks = ON;
+
+show variables like 'innodb_status_output_locks';     
+-- +----------------------------+-------+
+-- | Variable_name              | Value |
+-- +----------------------------+-------+
+-- | innodb_status_output_locks | ON    |
+-- +----------------------------+-------+
+-- 1 row in set (0.002 sec)
+```
+
+Later on, you can use SQL to query for more detailed deadlock information.
+
+```sql
+show engine  innodb status\G
+
+-- ------------------------
+-- LATEST DETECTED DEADLOCK
+-- ------------------------
+-- 2023-10-26 02:47:48 0x7f9690525640
+-- *** (1) TRANSACTION:
+-- TRANSACTION 3435, ACTIVE 67 sec starting index read
+-- == mysql tables in use 1, locked 1
+-- LOCK WAIT 3 lock struct(s), heap size 1128, 2 row lock(s)
+-- MySQL thread id 32, OS thread handle 140284643444288, query id 106 localhost root Statistics
+-- SELECT * FROM Table1 WHERE id = 2 FOR UPDATE
+-- *** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+-- RECORD LOCKS space id 160 page no 3 n bits 72 index PRIMARY of table `panhong`.`Table1` trx id 3435 lock_mode X locks rec but not gap waiting
+-- Record lock, heap no 3 PHYSICAL RECORD: n_fields 4; compact format; info bits 0
+--  0: len 4; hex 80000002; asc     ;;
+--  1: len 6; hex 000000000000; asc       ;;
+--  2: len 7; hex 80000000000000; asc        ;;
+--  3: len 3; hex 546f6d; asc Tom;;
+```
 
